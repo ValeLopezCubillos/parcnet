@@ -33,6 +33,10 @@ model = PARCnet(
     lite=True
 )
 
+@app.get("/")
+def read_root():
+    return {"message": "API PARCnet funcionando. Usa POST /parcnet"}
+
 @app.post("/parcnet")
 async def enhance_audio(file: UploadFile = File(...)):
     # Cargar audio
