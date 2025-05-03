@@ -258,3 +258,9 @@ async def enhance_audio(file: UploadFile = File(...)):
             status_code=500,
             detail="Internal error processing request"
         )
+
+if __name__ == "__main__":
+    import uvicorn
+    import os
+    port = int(os.environ.get("PORT", 10000))  # Usa el puerto de Render o 10000 por defecto
+    uvicorn.run(app, host="0.0.0.0", port=port)
