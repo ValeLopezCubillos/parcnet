@@ -1,4 +1,4 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from parcnet import PARCnet
@@ -57,6 +57,93 @@ def read_root():
             "POST /parcnet-with-trace": "Reconstruct audio with provided loss mask"
         }
     }
+
+@app.post("/parcnet2")
+async def enhance_audio_simple(file: UploadFile = File(...)):
+    try:
+        logger.info(f"Processing file: {file.filename}")
+        file_content = await file.read()
+        try:
+            audio, sr = librosa.load(io.BytesIO(file_content), sr=44100, mono=True)
+        except Exception as e:
+            logger.error(f"Error loading audio: {str(e)}")
+            raise HTTPException(
+                status_code=400,
+                detail="Unsupported audio format. Use mono WAV files at 44.1kHz"
+            )
+
+        packet_size = 512
+        original_length = len(audio)
+        if len(audio) % packet_size != 0:
+            audio = audio[:-(len(audio) % packet_size)]
+            logger.warning(f"Adjusted length from {original_length} to {len(audio)} samples")
+        trace = (np.abs(audio) > 1e-6).astype(np.float32)
+        loss_percentage = np.mean(trace == 0) * 100
+        
+        if len(audio) == 0:
+            logger.error("Empty audio after preprocessing")
+            raise HTTPException(
+                status_code=400,
+                detail="Audio was empty after preprocessing"
+            )
+        try:
+            logger.info(f"Starting reconstruction: {len(audio)} samples, {loss_percentage:.1f}% losses")
+            
+            trace = trace[:len(audio) // packet_size * packet_size]
+            trace = trace.reshape(-1, packet_size).any(axis=1).astype(np.float32)
+            
+            enhanced = model(audio, trace)
+            
+            if len(enhanced) != len(audio):
+                logger.error(f"Dimensional error: input {len(audio)} vs output {len(enhanced)}")
+                raise ValueError("Reconstructed audio has different length than original")
+                
+        except Exception as e:
+            logger.error(f"Reconstruction error: {str(e)}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Error during reconstruction: {str(e)}"
+            )
+        audio_buffer = io.BytesIO()
+        sf.write(audio_buffer, enhanced, sr, format='WAV', subtype='PCM_16')
+        audio_buffer.seek(0)
+
+        logger.info("Reconstruction successful")
+        return StreamingResponse(
+            audio_buffer,
+            media_type="audio/wav",
+            headers={
+                "Content-Disposition": f"attachment; filename=reconstructed_{file.filename}",
+            }
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail="Internal error processing request"
+        )
+    
+@app.post("/detect_loss")
+async def detect_packet_loss(file: UploadFile = File(...)):
+    try:
+        file_content = await file.read()
+        audio, sr = librosa.load(io.BytesIO(file_content), sr=44100, mono=True)
+
+        packet_size = 512
+        if len(audio) % packet_size != 0:
+            audio = audio[:-(len(audio) % packet_size)]
+        
+        trace = (np.abs(audio) > 1e-6).astype(np.float32)
+        loss_percentage = np.mean(trace == 0) * 100
+
+        return {"loss_percentage": loss_percentage}
+    
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+
 
 @app.post("/parcnet")
 async def enhance_audio(file: UploadFile = File(...)):
