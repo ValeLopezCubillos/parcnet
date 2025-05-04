@@ -63,5 +63,8 @@ async def enhance_audio(audio: UploadFile = File(...)):
     return StreamingResponse(buffer, media_type="audio/wav", headers={"Content-Disposition": "inline; filename=enhanced.wav"})
 
 if __name__ == "__main__":
-    uvicorn.run("api:app", host="0.0.0.0", port=8081)
+    import os
+    port = int(os.environ.get("PORT", 8081))
+    uvicorn.run("api:app", host="0.0.0.0", port=port)
+
 
