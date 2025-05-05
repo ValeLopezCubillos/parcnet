@@ -1,16 +1,24 @@
-# api.py
 from fastapi import FastAPI, File, UploadFile
-from fastapi.responses import StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import numpy as np
 import soundfile as sf
 import torch
-import uvicorn
 import tempfile
-from io import BytesIO
-from pathlib import Path
+import aubio
 from parcnet import PARCnet
+from io import BytesIO
 
 app = FastAPI()
+
+# Permitir acceso desde frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Puedes restringir esto a tu dominio si lo deseas
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # Inicializar PARCnet
 parcnet = PARCnet(
@@ -26,8 +34,10 @@ parcnet = PARCnet(
     lite=True,
 )
 
+NOTE_STRINGS = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+
 def detect_loss_trace(audio: np.ndarray, packet_size: int = 512, silence_threshold: float = 1e-4) -> np.ndarray:
-    """Detecta paquetes perdidos por umbral de silencio."""
+    """Detectar pérdida por bloques de silencio"""
     num_packets = len(audio) // packet_size
     trace = np.ones(num_packets, dtype=int)
     for i in range(num_packets):
@@ -35,6 +45,49 @@ def detect_loss_trace(audio: np.ndarray, packet_size: int = 512, silence_thresho
         if np.all(np.abs(packet) < silence_threshold):
             trace[i] = 0
     return trace
+
+def get_note_from_freq(freq: float):
+    """Convertir frecuencia en nota musical"""
+    if freq <= 0.0:
+        return None
+    A4 = 440.0
+    note_number = 69 + 12 * np.log2(freq / A4)
+    midi = int(round(note_number))
+    note_name = NOTE_STRINGS[midi % 12]
+    octave = midi // 12 - 1
+    return f"{note_name}{octave}"
+
+@app.post("/detect_note")
+async def detect_note(audio: UploadFile = File(...)):
+    try:
+        raw = await audio.read()
+        with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp_audio:
+            tmp_audio.write(raw)
+            tmp_audio_path = tmp_audio.name
+
+        # Leer audio
+        signal, sr = sf.read(tmp_audio_path)
+        if signal.ndim > 1:
+            signal = np.mean(signal, axis=1)  # convertir a mono
+        signal = signal.astype(np.float32)
+
+        # Detectar pérdida
+        trace = detect_loss_trace(signal)
+        if 0 in trace:
+            signal = parcnet(signal, trace)
+
+        # Detección de frecuencia con Aubio
+        pitch_detector = aubio.pitch("default", 2048, 512, sr)
+        pitch_detector.set_unit("Hz")
+        pitch_detector.set_silence(-40)
+
+        freq = pitch_detector(signal)[0]
+        note = get_note_from_freq(freq)
+
+        return JSONResponse(content={"note": note, "frequency": freq})
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
 
 @app.post("/parcnet")
 async def enhance_audio(audio: UploadFile = File(...)):
