@@ -5,7 +5,8 @@ import numpy as np
 import soundfile as sf
 import torch
 import tempfile
-import aubio
+import uvicorn
+import librosa
 from parcnet import PARCnet
 from io import BytesIO
 
@@ -65,23 +66,18 @@ async def detect_note(audio: UploadFile = File(...)):
             tmp_audio.write(raw)
             tmp_audio_path = tmp_audio.name
 
-        # Leer audio
         signal, sr = sf.read(tmp_audio_path)
         if signal.ndim > 1:
-            signal = np.mean(signal, axis=1)  # convertir a mono
+            signal = np.mean(signal, axis=1)
         signal = signal.astype(np.float32)
 
-        # Detectar pérdida
         trace = detect_loss_trace(signal)
         if 0 in trace:
             signal = parcnet(signal, trace)
 
-        # Detección de frecuencia con Aubio
-        pitch_detector = aubio.pitch("default", 2048, 512, sr)
-        pitch_detector.set_unit("Hz")
-        pitch_detector.set_silence(-40)
+        pitches = librosa.yin(signal, fmin=librosa.note_to_hz('C2'), fmax=librosa.note_to_hz('C7'), sr=sr)
+        freq = float(np.median(pitches))  
 
-        freq = pitch_detector(signal)[0]
         note = get_note_from_freq(freq)
 
         return JSONResponse(content={"note": note, "frequency": freq})
@@ -99,16 +95,13 @@ async def enhance_audio(audio: UploadFile = File(...)):
 
     signal, sr = sf.read(tmp_audio_path)
     if signal.ndim > 1:
-        signal = np.mean(signal, axis=1)  # convertir a mono
+        signal = np.mean(signal, axis=1)  
     signal = signal.astype(np.float32)
 
-    # Detectar traza
     trace = detect_loss_trace(signal)
 
-    # Reconstrucción
     enhanced = parcnet(signal, trace)
 
-    # Guardar en buffer
     buffer = BytesIO()
     sf.write(buffer, enhanced, sr, format='WAV')
     buffer.seek(0)
