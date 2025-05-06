@@ -73,7 +73,8 @@ async def detect_note(audio: UploadFile = File(...)):
         tmp_wav.close()
 
         ffmpeg_cmd = [
-            "C:/ffmpeg/ffmpeg-7.1.1-essentials_build/bin/ffmpeg.exe", "-y",
+            #"C:/ffmpeg/ffmpeg-7.1.1-essentials_build/bin/ffmpeg.exe", "-y",
+            "ffmpeg", "-y",
             "-i", tmp_webm_path,
             "-ar", "16000",  
             "-ac", "1",      
