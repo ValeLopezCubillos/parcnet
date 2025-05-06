@@ -8,6 +8,7 @@ import tempfile
 import uvicorn
 import librosa
 import traceback
+import imageio_ffmpeg #PARA RENDER
 from parcnet import PARCnet
 from io import BytesIO
 import subprocess
@@ -72,9 +73,11 @@ async def detect_note(audio: UploadFile = File(...)):
         tmp_wav_path = tmp_wav.name
         tmp_wav.close()
 
+        ffmpeg_path = imageio_ffmpeg.get_ffmpeg_exe() #PARA RENDER
+
         ffmpeg_cmd = [
             #"C:/ffmpeg/ffmpeg-7.1.1-essentials_build/bin/ffmpeg.exe", "-y",
-            "ffmpeg", "-y",
+            ffmpeg_path, "-y", #PARA RENDER
             "-i", tmp_webm_path,
             "-ar", "16000",  
             "-ac", "1",      
