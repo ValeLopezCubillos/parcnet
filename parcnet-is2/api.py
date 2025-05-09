@@ -11,6 +11,7 @@ import traceback
 from parcnet import PARCnet
 from io import BytesIO
 import subprocess
+from scipy.signal import firwin, lfilter
 
 app = FastAPI()
 
@@ -60,7 +61,7 @@ def get_note_from_freq(freq: float):
     octave = midi // 12 - 1
     return f"{note_name}{octave}"
 
-@app.post("/detect_note")
+@app.post("/detect_note2")
 async def detect_note(audio: UploadFile = File(...)):
     try:
         raw = await audio.read()
@@ -74,8 +75,8 @@ async def detect_note(audio: UploadFile = File(...)):
 
 
         ffmpeg_cmd = [
-            #"C:/ffmpeg/ffmpeg-7.1.1-essentials_build/bin/ffmpeg.exe", "-y",
-            "ffmpeg", "-y",
+            "C:/ffmpeg/ffmpeg-7.1.1-essentials_build/bin/ffmpeg.exe", "-y",
+            #"ffmpeg", "-y",
             "-i", tmp_webm_path,
             "-ar", "16000",  
             "-ac", "1",      
@@ -98,6 +99,75 @@ async def detect_note(audio: UploadFile = File(...)):
         pitches = librosa.yin(signal, fmin=librosa.note_to_hz('C2'), fmax=librosa.note_to_hz('C7'), sr=sr)
         freq = float(np.median(pitches))  
         note = get_note_from_freq(freq)
+
+        return JSONResponse(content={"note": note, "frequency": freq})
+
+    except Exception as e:
+        print("❌ Error en /detect_note:", str(e))
+        traceback.print_exc()
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+@app.post("/detect_note")
+async def detect_note(audio: UploadFile = File(...)):
+    try:
+        raw = await audio.read()
+        with tempfile.NamedTemporaryFile(suffix=".webm", delete=False) as tmp_webm:
+            tmp_webm.write(raw)
+            tmp_webm_path = tmp_webm.name
+
+        tmp_wav = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
+        tmp_wav_path = tmp_wav.name
+        tmp_wav.close()
+
+        ffmpeg_cmd = [
+            #"C:/ffmpeg/ffmpeg-7.1.1-essentials_build/bin/ffmpeg.exe", "-y",
+            "ffmpeg", "-y",
+            "-i", tmp_webm_path,
+            "-ar", "16000",
+            "-ac", "1",
+            tmp_wav_path
+        ]
+        subprocess.run(ffmpeg_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+        signal, sr = sf.read(tmp_wav_path)
+        if signal.ndim > 1:
+            signal = np.mean(signal, axis=1)
+        signal = signal.astype(np.float32)
+
+        # 📌 Simular pérdida 
+        packet_size = 512
+        num_packets = len(signal) // packet_size
+        loss_percent = 0.10  #10% de pérdida
+        num_lost_packets = int(num_packets * loss_percent)
+        loss_mask = np.ones(num_packets, dtype=int)
+        lost_indices = np.random.choice(num_packets, num_lost_packets, replace=False)
+
+        for i in lost_indices:
+            loss_mask[i] = 0
+            signal[i * packet_size:(i + 1) * packet_size] = 0.0
+
+        trace = loss_mask
+        loss_ratio = np.mean(trace == 0)
+        print(f"🔧 Pérdida simulada: {loss_ratio*100:.2f}%, paquetes perdidos: {np.sum(trace == 0)}")
+        pitches_before = librosa.yin(signal, fmin=librosa.note_to_hz('C2'),
+                                     fmax=librosa.note_to_hz('C7'), sr=sr)
+        freq_before = float(np.median(pitches_before))
+        note_before = get_note_from_freq(freq_before)
+        print(f"🕵️ Nota antes de PARCnet: {note_before} ({freq_before:.2f} Hz)")
+
+        if loss_ratio > 0.01:
+            print("⚙️ Ejecutando PARCnet para reconstrucción...")
+            enhanced = parcnet(signal, trace)
+            for i, lost in enumerate(trace):
+                if lost == 0:
+                    start = i * packet_size
+                    end = start + packet_size
+                    signal[start:end] = enhanced[start:end]
+        pitches = librosa.yin(signal, fmin=librosa.note_to_hz('C2'), fmax=librosa.note_to_hz('C7'), sr=sr)
+        freq = float(np.median(pitches))
+        note = get_note_from_freq(freq)
+
+        print(f"🎵 Nota detectada despues de PARCnet: {note} ({freq:.2f} Hz)")
 
         return JSONResponse(content={"note": note, "frequency": freq})
 
