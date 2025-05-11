@@ -1,18 +1,17 @@
 # Dockerfile
-FROM pytorch/pytorch:2.0.1-cpu
+# syntax=docker/dockerfile:1
+FROM pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
 
 WORKDIR /app
 
-# Copiamos sólo requirements.txt e instalamos FastAPI y Uvicorn
+# Sólo instalamos FastAPI y Uvicorn (todo lo demás ya viene preinstalado)
 COPY requirements.txt ./
 RUN pip install --no-cache-dir fastapi uvicorn[standard] \
     && pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-# Escuchamos en el PORT que Render nos dé
 EXPOSE $PORT
-ENTRYPOINT ["sh", "-c"]
+ENTRYPOINT ["sh","-c"]
 CMD ["uvicorn webSocket:app --host 0.0.0.0 --port ${PORT:-8081} --log-level debug"]
-
 
