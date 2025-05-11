@@ -1,21 +1,26 @@
-FROM python:3.9-slim
+# Dockerfile
 
+# 1. Imagen base
+FROM python:3.10-slim
+
+# 2. Variables de entorno
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+
+# 3. Directorio de trabajo
 WORKDIR /app
 
-# Instalar ffmpeg y dependencias
-RUN apt-get update && apt-get install -y ffmpeg gcc && \
-    apt-get clean && rm -rf /var/lib/apt/lists/*
+# 4. Copiar y instalar dependencias
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
 
-# Copiar el código al contenedor
-COPY . /app
+# 5. Copiar el resto del código
+COPY . .
 
-# Instalar dependencias Python
-RUN pip install --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
-
-# Puerto que usa Uvicorn
+# 6. Exponer el puerto que usa Uvicorn
 EXPOSE 8081
 
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8081"]
+# 7. Comando por defecto
+CMD ["uvicorn", "webSocket:app", "--host", "0.0.0.0", "--port", "8081"]
 
 
