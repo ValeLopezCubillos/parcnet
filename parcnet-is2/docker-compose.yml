@@ -1,11 +1,6 @@
 services:
   parcnet:
     build: .
-    container_name: parcnet_service
     ports:
       - "8081:8081"
-    volumes:
-      - .:/app
-    environment:
-      - PYTHONUNBUFFERED=1
     restart: unless-stopped
