@@ -71,35 +71,59 @@ def detect_note(audio: np.ndarray, sample_rate: int = SAMPLE_RATE):
 async def ws_parcnet(ws: WebSocket):
     await ws.accept()
     buffer = np.zeros(PACKET_SIZE, dtype=np.float32)
-    trace = [] 
+    trace = []
     try:
         while True:
-            data = await ws.receive_bytes()
-            chunk = np.frombuffer(data, dtype=np.float32)
-            if chunk.shape[0] != PACKET_SIZE:
-                chunk = np.resize(chunk, PACKET_SIZE)
-            received = not np.all(chunk == 0.0)
-            trace.append(1 if received else 0)
-            buffer = chunk.copy()
-            loss_ratio = trace.count(0) / len(trace)
-            if loss_ratio > LOSS_THRESHOLD:
-                enhanced = parcnet(buffer, np.array(trace, dtype=int))
-                for i, flag in enumerate(trace):
-                    if flag == 0:
-                        start = i * PACKET_SIZE
-                        end = start + PACKET_SIZE
-                        buffer[start:end] = enhanced[start:end]
-            pitches = librosa.yin(buffer,
-                                  fmin=librosa.note_to_hz('C2'),
-                                  fmax=librosa.note_to_hz('C7'),
-                                  sr=16000)
-            freq = float(np.median(pitches))
-            note = get_note_from_freq(freq)
-            await ws.send_json({"note": note, "frequency": freq})
-            if len(trace) > 100:
-                trace = trace[-100:]
+            try:
+                data = await ws.receive_bytes()
+                print(f"🔄 Recibidos {len(data)} bytes")                                  # log1
+
+                # convierto a float32 y aplico trazado de pérdidas
+                chunk = np.frombuffer(data, dtype=np.float32)
+                if chunk.size != PACKET_SIZE:
+                    chunk = np.resize(chunk, PACKET_SIZE)
+
+                received = not np.all(chunk == 0.0)
+                trace.append(1 if received else 0)
+                buffer = chunk.copy()
+
+                # reconstrucción si hay >1% pérdidas
+                loss_ratio = trace.count(0) / len(trace)
+                if loss_ratio > LOSS_THRESHOLD:
+                    enhanced = parcnet(buffer, np.array(trace, dtype=int))
+                    for i, flag in enumerate(trace):
+                        if flag == 0:
+                            start = i * PACKET_SIZE
+                            buffer[start:start+PACKET_SIZE] = enhanced[start:start+PACKET_SIZE]
+
+                # detección de nota
+                note, freq = None, None
+                try:
+                    pitches = librosa.yin(buffer,
+                                           fmin=librosa.note_to_hz('C2'),
+                                           fmax=librosa.note_to_hz('C7'),
+                                           sr=SAMPLE_RATE)
+                    freq = float(np.median(pitches))
+                    note = get_note_from_freq(freq)
+                except Exception as e_yin:
+                    print("⚠️ Error al extraer pitch:", e_yin)
+
+                print(f"🎼 Detectado: {note} — {freq} Hz")                                   # log2
+
+                # envío JSON
+                payload = {"note": note, "frequency": freq}
+                await ws.send_json(payload)
+                print("✅ Enviado JSON:", payload)                                         # log3
+
+                # mantengo solo últimos 100 flags
+                if len(trace) > 100:
+                    trace = trace[-100:]
+
+            except Exception as e:
+                print("❌ Error interno WS loop:", e)
+                # opcional: seguir al próximo paquete o cerrar ws
     except WebSocketDisconnect:
-        print("Cliente desconectado")
+        print("⚠️ Cliente desconectado")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8081))
