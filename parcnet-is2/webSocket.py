@@ -4,7 +4,8 @@ from fastapi.middleware.cors import CORSMiddleware
 import numpy as np
 import torch
 import librosa
-
+import os
+import uvicorn
 from parcnet import PARCnet  
 
 app = FastAPI()
@@ -70,53 +71,36 @@ def detect_note(audio: np.ndarray, sample_rate: int = SAMPLE_RATE):
 async def ws_parcnet(ws: WebSocket):
     await ws.accept()
     buffer = np.zeros(PACKET_SIZE, dtype=np.float32)
-    trace = []  # 1 si llegó el paquete, 0 si perdido
+    trace = [] 
     try:
         while True:
             data = await ws.receive_bytes()
-            # Convierte bytes en float32
             chunk = np.frombuffer(data, dtype=np.float32)
-
-            # Si el cliente enviara menos/más muestras, podrías recortarlo o rellenar
             if chunk.shape[0] != PACKET_SIZE:
                 chunk = np.resize(chunk, PACKET_SIZE)
-
-            # Simula “pérdida” si todos ceros (o define tu propia detección)
             received = not np.all(chunk == 0.0)
             trace.append(1 if received else 0)
-
-            # Acumula el buffer (aquí lo procesas por paquete)
             buffer = chunk.copy()
-
-            # Una vez tengas PACKET_SIZE*“n” muestras, o cada paquete:
             loss_ratio = trace.count(0) / len(trace)
             if loss_ratio > LOSS_THRESHOLD:
-                # Si hay más de 1% de pérdidas, aplica PARCnet
                 enhanced = parcnet(buffer, np.array(trace, dtype=int))
-                # Rellena solo los slots perdidos
                 for i, flag in enumerate(trace):
                     if flag == 0:
                         start = i * PACKET_SIZE
                         end = start + PACKET_SIZE
                         buffer[start:end] = enhanced[start:end]
-
-            # Detecta nota en el paquete (o en una ventana mayor)
             pitches = librosa.yin(buffer,
                                   fmin=librosa.note_to_hz('C2'),
                                   fmax=librosa.note_to_hz('C7'),
                                   sr=16000)
             freq = float(np.median(pitches))
             note = get_note_from_freq(freq)
-
-            # Envía JSON con la nota
             await ws.send_json({"note": note, "frequency": freq})
-
-            # Reinicia trace si quieres un window fijo
             if len(trace) > 100:
                 trace = trace[-100:]
     except WebSocketDisconnect:
         print("Cliente desconectado")
 
 if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("webSocket:app", host="0.0.0.0", port=8081)
+    port = int(os.environ.get("PORT", 8081))
+    uvicorn.run("webSocket:app", host="0.0.0.0", port=port)
