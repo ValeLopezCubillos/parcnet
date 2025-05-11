@@ -11,6 +11,8 @@ RUN pip install --no-cache-dir fastapi uvicorn[standard] \
 
 COPY . .
 
+ENV PYTHONUNBUFFERED=1
+
 EXPOSE $PORT
 ENTRYPOINT ["sh","-c"]
 CMD ["uvicorn webSocket:app --host 0.0.0.0 --port ${PORT:-8081} --log-level debug"]
