@@ -72,8 +72,10 @@ async def websocket_parcnet(ws: WebSocket):
         while True:
             chunk = await ws.receive_bytes()
             audio = np.frombuffer(chunk, dtype=np.float32)
+            audio = np.nan_to_num(audio, nan=0.0, posinf=0.0, neginf=0.0)
             trace = detect_loss_trace(audio)
             enhanced = parcnet(audio, trace)
+            enhanced = np.nan_to_num(enhanced, nan=0.0, posinf=0.0, neginf=0.0)
             note_name, frequency = detect_note(enhanced)
             await ws.send_bytes(enhanced.astype(np.float32).tobytes())
             await ws.send_json({
