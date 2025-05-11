@@ -32,7 +32,10 @@ parcnet = PARCnet(
     nn_fade_dim=64,
     device="cuda" if torch.cuda.is_available() else "cpu",
     lite=True,
-)  
+)
+@app.get("/healthz")
+async def healthz():
+    return {"status": "ok"}  
 
 def detect_loss_trace(audio: np.ndarray, packet_size: int = PACKET_SIZE,
                       silence_threshold: float = 1e-4) -> np.ndarray:
