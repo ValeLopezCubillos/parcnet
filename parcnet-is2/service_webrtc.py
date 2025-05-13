@@ -143,6 +143,9 @@ async def offer(request: Request):
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
+    while pc.iceGatheringState != "complete":
+        await asyncio.sleep(0.1)
+
     return JSONResponse({
         "sdp": pc.localDescription.sdp,
         "type": pc.localDescription.type
