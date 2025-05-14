@@ -54,20 +54,26 @@ def fetch_xirsys_ice():
     ident  = "ValeLopezCubillos"
     secret = "08b07ede-306d-11f0-83bd-0242ac150002"
     url    = f"https://ValeLopezCubillos:08b07ede-306d-11f0-83bd-0242ac150002@global.xirsys.net/_turn/musicnet-demo"
-    res = requests.put(url, json={"format":"urls"}, timeout=5)
+    res = requests.put(
+        url,
+        headers={"Content-Type": "application/json"},
+        json={"format": "urls"},
+        timeout=5
+    )
     res.raise_for_status()
     resp = res.json()
     container = resp.get("v") or resp.get("d")
     ice_data = container["iceServers"]
-    if isinstance(ice_data, dict):
-        ice_list = [ice_data]
-    else:
-        ice_list = ice_data
+
+    ice_entries = [ice_data] if isinstance(ice_data, dict) else ice_data
+
     return [
-        {"urls": entry["urls"],
-         "username": entry.get("username"),
-         "credential": entry.get("credential")}
-        for entry in ice_list
+        RTCIceServer(
+            urls=entry["urls"],
+            username=entry.get("username"),
+            credential=entry.get("credential")
+        )
+        for entry in ice_entries
     ]
 
 ice_servers = fetch_xirsys_ice()
