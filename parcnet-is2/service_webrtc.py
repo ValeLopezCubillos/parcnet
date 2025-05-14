@@ -100,7 +100,7 @@ async def offer(request: Request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-    # crea PeerConnection con config ICE
+    # 1) crea PeerConnection con ICE dinámico
     pc = RTCPeerConnection(rtc_config)
     media_blackhole = MediaBlackhole()
 
@@ -113,34 +113,31 @@ async def offer(request: Request):
     def on_conn_state():
         print("🛡️ [SERVER] Connection state:", pc.connectionState)
 
-    # prepárate para capturar el DataChannel que crea el cliente
+    # 2) captura el DataChannel que abre el cliente
     dc = None
+    pending_trigger = False
 
     @pc.on("datachannel")
     def on_datachannel(channel):
-        nonlocal dc
+        nonlocal dc, pending_trigger
         dc = channel
         print("🟢 [SERVER] DataChannel abierto por el cliente")
 
         @dc.on("open")
         def on_dc_open():
             print("🟢 [SERVER] DataChannel READY")
-            # heartbeat para mantener SCTP vivo
-            async def heartbeat():
-                while dc.readyState == "open":
-                    dc.send("ping")
-                    await asyncio.sleep(1.0)
-            asyncio.create_task(heartbeat())
 
         @dc.on("message")
         def on_dc_message(msg):
-            print("📨 [SERVER] mensaje recibido en DC:", msg)
+            # cada mensaje es un trigger para procesar la última ventana
+            print("📨 [SERVER] Trigger recibido:", msg)
+            pending_trigger = True
 
         @dc.on("close")
         def on_dc_close():
             print("⚠️ [SERVER] DataChannel cerrado por el cliente")
 
-    # estadísticas de pérdida
+    # 3) estadísticas de pérdida
     stats = {"packetsLost": 0, "packetsReceived": 0, "loss_rate": 0.0}
 
     async def stats_loop():
@@ -156,7 +153,7 @@ async def offer(request: Request):
 
     asyncio.create_task(stats_loop())
 
-    # procesamiento de la pista de audio
+    # 4) procesamiento de la pista de audio
     @pc.on("track")
     async def on_track(track: MediaStreamTrack):
         if track.kind != "audio":
@@ -172,64 +169,76 @@ async def offer(request: Request):
                 except Exception:
                     break
 
+                # normaliza y resamplea
                 pcm = frame.to_ndarray()[0].astype(np.float32) / 32768.0
                 if frame.sample_rate != SR:
                     pcm = librosa.resample(pcm, orig_sr=frame.sample_rate, target_sr=SR)
 
                 buffer.append(pcm)
 
-                if stats["loss_rate"] > LOSS_THRESHOLD:
+                # si llegó un trigger, procesa esta ventana
+                if pending_trigger:
+                    pending_trigger = False
+
+                    # concatena buffer
                     full_signal = np.concatenate(buffer)
                     trace = np.zeros(len(full_signal) // cfg["global"]["packet_dim"], dtype=int)
-                    enhanced = parcnet(full_signal, trace)
-                    window = enhanced[-len(pcm):]
-                    buffer = []
-                    applied_parcnet = True
-                else:
-                    window = pcm
-                    applied_parcnet = False
+                    # aplica PARCnet si hace falta
+                    if stats["loss_rate"] > LOSS_THRESHOLD:
+                        enhanced = parcnet(full_signal, trace)
+                        window = enhanced[-len(pcm):]
+                        applied_parcnet = True
+                    else:
+                        window = pcm
+                        applied_parcnet = False
 
-                f0 = librosa.yin(
-                    y=window,
-                    fmin=librosa.note_to_hz("C2"),
-                    fmax=librosa.note_to_hz("C7"),
-                    sr=SR,
-                    frame_length=2048,
-                    hop_length=512,
-                )
-                f0_clean = f0[~np.isnan(f0)]
-                if len(f0_clean) == 0:
-                    continue
-                frequency = float(np.median(f0_clean))
-                midi = librosa.hz_to_midi(frequency)
-                midi_corrected = int(np.round(midi)) + 12
-                note_name = librosa.midi_to_note(midi_corrected)
-
-                if applied_parcnet:
-                    print(
-                        f"[LOSS_RATE: {stats['loss_rate']*100:.1f}%] "
-                        f"[PARCnet applied: True] "
-                        f"[Detected note: {note_name} @ {frequency:.1f} Hz]"
+                    # detección de pitch
+                    f0 = librosa.yin(
+                        y=window,
+                        fmin=librosa.note_to_hz("C2"),
+                        fmax=librosa.note_to_hz("C7"),
+                        sr=SR,
+                        frame_length=2048,
+                        hop_length=512,
                     )
+                    f0_clean = f0[~np.isnan(f0)]
+                    if len(f0_clean) == 0:
+                        buffer.clear()
+                        continue
+                    frequency = float(np.median(f0_clean))
+                    midi = librosa.hz_to_midi(frequency)
+                    midi_corrected = int(np.round(midi)) + 12
+                    note_name = librosa.midi_to_note(midi_corrected)
 
-                # envía por el canal recibido
-                if dc and dc.readyState == "open":
-                    dc.send(json.dumps({
-                        "note": note_name,
-                        "frequency": frequency,
-                        "loss_rate": stats["loss_rate"]
-                    }))
+                    # log si PARCnet
+                    if applied_parcnet:
+                        print(
+                            f"[LOSS_RATE: {stats['loss_rate']*100:.1f}%] "
+                            f"[PARCnet applied: True] "
+                            f"[Detected note: {note_name} @ {frequency:.1f} Hz]"
+                        )
+
+                    # envía resultado por DataChannel
+                    if dc and dc.readyState == "open":
+                        dc.send(json.dumps({
+                            "note": note_name,
+                            "frequency": frequency,
+                            "loss_rate": stats["loss_rate"]
+                        }))
+
+                    # limpia buffer
+                    buffer.clear()
 
         finally:
             track.stop()
             await media_blackhole.start()
 
-    # intercambio SDP
+    # 5) intercambio SDP
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    # espera a que termine ICE gathering
+    # espera ICE gathering
     while pc.iceGatheringState != "complete":
         await asyncio.sleep(0.1)
 
@@ -237,3 +246,4 @@ async def offer(request: Request):
         "sdp": pc.localDescription.sdp,
         "type": pc.localDescription.type
     })
+
