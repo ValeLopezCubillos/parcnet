@@ -8,7 +8,8 @@ import yaml
 import asyncio
 import torch
 
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCConfiguration, RTCIceServer
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate
+import asyncio
 from aiortc.contrib.media import MediaBlackhole
 
 from parcnet import PARCnet
@@ -39,25 +40,22 @@ parcnet = PARCnet(
     lite=cfg["neural_net"]["lite"],
 )
 
-ice_servers = [
-    RTCIceServer(urls="stun:stun.l.google.com:19302"),
-    RTCIceServer(
-        urls="turn:numb.viagenie.ca:3478",
-        username="webrtc@live.com",
-        credential="muazkh"
-    )
-]
-rtc_config = RTCConfiguration(iceServers=ice_servers)
+ice_servers = [{"urls": "stun:stun.l.google.com:19302"}]
+pc = RTCPeerConnection({"iceServers": ice_servers})
 
-# Y al crear el PC:
-pc = RTCPeerConnection(rtc_config)
+pending_ice = []
+
+@pc.on("icecandidate")
+def on_icecandidate(event):
+    if event.candidate:
+        pending_ice.append(event.candidate)
 
 @app.post("/offer")
 async def offer(request: Request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-    pc = RTCPeerConnection(rtc_config)
+    pc = RTCPeerConnection({"iceServers": ice_servers})
     dc = pc.createDataChannel("control")
     media_blackhole = MediaBlackhole()
 
@@ -143,8 +141,13 @@ async def offer(request: Request):
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    while pc.iceGatheringState != "complete":
-        await asyncio.sleep(0.1)
+    async def wait_ice():
+        # timeout si algo falla
+        for _ in range(50):
+            if pc.iceGatheringState == "complete":
+                return
+            await asyncio.sleep(0.1)
+    await wait_ice()
 
     return JSONResponse({
         "sdp": pc.localDescription.sdp,
