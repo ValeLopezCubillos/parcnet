@@ -10,6 +10,7 @@ import asyncio
 import torch
 import os
 import requests
+
 from aiortc import (
     RTCPeerConnection,
     RTCConfiguration,
@@ -25,7 +26,7 @@ from parcnet import PARCnet
 SR = 44100
 LOSS_THRESHOLD = 0.10  # 10%
 
-# Configura FastAPI y CORS
+# FastAPI + CORS
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -33,7 +34,7 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
-# Carga configuración de PARCnet
+# Carga modelo PARCnet
 with open("config/config.yaml") as f:
     cfg = yaml.safe_load(f)
 
@@ -54,6 +55,7 @@ def fetch_xirsys_ice():
     ident  = "ValeLopezCubillos"
     secret = "08b07ede-306d-11f0-83bd-0242ac150002"
     url    = f"https://ValeLopezCubillos:08b07ede-306d-11f0-83bd-0242ac150002@global.xirsys.net/_turn/musicnet-demo"
+
     res = requests.put(
         url,
         headers={"Content-Type": "application/json"},
@@ -65,8 +67,10 @@ def fetch_xirsys_ice():
     container = resp.get("v") or resp.get("d")
     ice_data = container["iceServers"]
 
+    # Asegura lista
     ice_entries = [ice_data] if isinstance(ice_data, dict) else ice_data
 
+    # Devuelve instancias RTCIceServer
     return [
         RTCIceServer(
             urls=entry["urls"],
@@ -76,24 +80,63 @@ def fetch_xirsys_ice():
         for entry in ice_entries
     ]
 
+# Construye configuración ICE
 ice_servers = fetch_xirsys_ice()
 rtc_config  = RTCConfiguration(iceServers=ice_servers)
 
 @app.get("/ice")
 def get_ice():
-    return {"iceServers": fetch_xirsys_ice()}
+    # para debugging o cliente que pida ICE
+    return {"iceServers": [
+        {
+            "urls": s.urls,
+            "username": s.username,
+            "credential": s.credential
+        } for s in fetch_xirsys_ice()
+    ]}
 
 @app.post("/offer")
 async def offer(request: Request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
+    # 1) crea PeerConnection con ICE dinámico
     pc = RTCPeerConnection(rtc_config)
-    dc = pc.createDataChannel("control")
     media_blackhole = MediaBlackhole()
 
-    stats = {"packetsLost": 0, "packetsReceived": 0, "loss_rate": 0.0}
+    # Logging ICE y conexión
+    @pc.on("iceconnectionstatechange")
+    def on_ice_state():
+        print("🔄 [SERVER] ICE state:", pc.iceConnectionState)
 
+    @pc.on("connectionstatechange")
+    def on_conn_state():
+        print("🛡️ [SERVER] Connection state:", pc.connectionState)
+
+    # 2) crea DataChannel y pon listeners
+    dc = pc.createDataChannel("control")
+
+    @dc.on("open")
+    def on_dc_open():
+        print("🟢 [SERVER] DataChannel abierto")
+        # heartbeat para mantener SCTP
+        async def heartbeat():
+            while dc.readyState == "open":
+                dc.send("ping")
+                await asyncio.sleep(1.0)
+        asyncio.create_task(heartbeat())
+
+    @dc.on("message")
+    def on_dc_message(msg):
+        # opcional: ver si llega el ping
+        print("📨 [SERVER] mensaje recibido en DC:", msg)
+
+    @dc.on("close")
+    def on_dc_close():
+        print("⚠️ [SERVER] DataChannel cerrado")
+
+    # 3) stats loop
+    stats = {"packetsLost": 0, "packetsReceived": 0, "loss_rate": 0.0}
     async def stats_loop():
         while True:
             report = await pc.getStats()
@@ -104,9 +147,9 @@ async def offer(request: Request):
                     if stats["packetsReceived"] > 0:
                         stats["loss_rate"] = stats["packetsLost"] / stats["packetsReceived"]
             await asyncio.sleep(1.0)
-
     asyncio.create_task(stats_loop())
 
+    # 4) track handler
     @pc.on("track")
     async def on_track(track: MediaStreamTrack):
         if track.kind != "audio":
@@ -171,10 +214,12 @@ async def offer(request: Request):
             track.stop()
             await media_blackhole.start()
 
+    # 5) intercambio SDP
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
+    # espera ICE gathering
     while pc.iceGatheringState != "complete":
         await asyncio.sleep(0.1)
 
