@@ -104,7 +104,28 @@ async def offer(request: Request):
     pc = RTCPeerConnection(rtc_config)
     media_blackhole = MediaBlackhole()
 
-    # logging ICE y conexión
+    # 1.a) variable para triggers desde el cliente
+    pending_trigger = False
+
+    # 1.b) crea proactivamente un DataChannel en el servidor
+    dc = pc.createDataChannel("control")
+    print("📡 [SERVER] DataChannel creado proactivamente")
+
+    @dc.on("open")
+    def _():
+        print("🟢 [SERVER] DataChannel READY")
+
+    @dc.on("message")
+    def _on_message(msg):
+        print("📨 [SERVER] Mensaje recibido por DataChannel:", msg)
+        # quizá el cliente envíe comandos también por aquí
+        # pending_trigger = True  # si quisieras usarlo
+
+    @dc.on("close")
+    def _():
+        print("⚠️ [SERVER] DataChannel cerrado por el cliente")
+
+    # 2) logging ICE y conexión
     @pc.on("iceconnectionstatechange")
     def on_ice_state():
         print("🔄 [SERVER] ICE state:", pc.iceConnectionState)
@@ -113,10 +134,7 @@ async def offer(request: Request):
     def on_conn_state():
         print("🛡️ [SERVER] Connection state:", pc.connectionState)
 
-    # 2) captura el DataChannel que abre el cliente
-    dc = None
-    pending_trigger = False
-
+    # 3) captura el DataChannel que abre el cliente (por si importan los labels del cliente)
     @pc.on("datachannel")
     def on_datachannel(channel):
         nonlocal dc, pending_trigger
@@ -124,22 +142,20 @@ async def offer(request: Request):
         print("🟢 [SERVER] DataChannel abierto por el cliente")
 
         @dc.on("open")
-        def on_dc_open():
+        def _():
             print("🟢 [SERVER] DataChannel READY")
 
         @dc.on("message")
-        def on_dc_message(msg):
-            # cada mensaje es un trigger para procesar la última ventana
+        def _on_trigger(msg):
             print("📨 [SERVER] Trigger recibido:", msg)
             pending_trigger = True
 
         @dc.on("close")
-        def on_dc_close():
+        def _():
             print("⚠️ [SERVER] DataChannel cerrado por el cliente")
 
-    # 3) estadísticas de pérdida
+    # 4) estadísticas de pérdida (igual que antes)…
     stats = {"packetsLost": 0, "packetsReceived": 0, "loss_rate": 0.0}
-
     async def stats_loop():
         while True:
             report = await pc.getStats()
@@ -150,10 +166,9 @@ async def offer(request: Request):
                     if stats["packetsReceived"] > 0:
                         stats["loss_rate"] = stats["packetsLost"] / stats["packetsReceived"]
             await asyncio.sleep(1.0)
-
     asyncio.create_task(stats_loop())
 
-    # 4) procesamiento de la pista de audio
+    # 5) procesamiento de audio y detección de nota
     @pc.on("track")
     async def on_track(track: MediaStreamTrack):
         if track.kind != "audio":
@@ -164,26 +179,17 @@ async def offer(request: Request):
 
         try:
             while True:
-                try:
-                    frame = await track.recv()
-                except Exception:
-                    break
-
-                # normaliza y resamplea
+                frame = await track.recv()
                 pcm = frame.to_ndarray()[0].astype(np.float32) / 32768.0
                 if frame.sample_rate != SR:
                     pcm = librosa.resample(pcm, orig_sr=frame.sample_rate, target_sr=SR)
 
                 buffer.append(pcm)
 
-                # si llegó un trigger, procesa esta ventana
                 if pending_trigger:
                     pending_trigger = False
-
-                    # concatena buffer
                     full_signal = np.concatenate(buffer)
                     trace = np.zeros(len(full_signal) // cfg["global"]["packet_dim"], dtype=int)
-                    # aplica PARCnet si hace falta
                     if stats["loss_rate"] > LOSS_THRESHOLD:
                         enhanced = parcnet(full_signal, trace)
                         window = enhanced[-len(pcm):]
@@ -192,7 +198,6 @@ async def offer(request: Request):
                         window = pcm
                         applied_parcnet = False
 
-                    # detección de pitch
                     f0 = librosa.yin(
                         y=window,
                         fmin=librosa.note_to_hz("C2"),
@@ -205,12 +210,12 @@ async def offer(request: Request):
                     if len(f0_clean) == 0:
                         buffer.clear()
                         continue
+
                     frequency = float(np.median(f0_clean))
                     midi = librosa.hz_to_midi(frequency)
                     midi_corrected = int(np.round(midi)) + 12
                     note_name = librosa.midi_to_note(midi_corrected)
 
-                    # log si PARCnet
                     if applied_parcnet:
                         print(
                             f"[LOSS_RATE: {stats['loss_rate']*100:.1f}%] "
@@ -218,7 +223,6 @@ async def offer(request: Request):
                             f"[Detected note: {note_name} @ {frequency:.1f} Hz]"
                         )
 
-                    # envía resultado por DataChannel
                     if dc and dc.readyState == "open":
                         dc.send(json.dumps({
                             "note": note_name,
@@ -226,19 +230,18 @@ async def offer(request: Request):
                             "loss_rate": stats["loss_rate"]
                         }))
 
-                    # limpia buffer
                     buffer.clear()
 
         finally:
             track.stop()
             await media_blackhole.start()
 
-    # 5) intercambio SDP
+    # 6) intercambio SDP
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    # espera ICE gathering
+    # 7) espera a que ICE termine de gather
     while pc.iceGatheringState != "complete":
         await asyncio.sleep(0.1)
 
