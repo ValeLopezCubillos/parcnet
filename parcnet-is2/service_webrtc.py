@@ -1,3 +1,5 @@
+# service_webrtc.py
+
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,15 +10,22 @@ import yaml
 import asyncio
 import torch
 
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack, RTCIceCandidate
-import asyncio
+from aiortc import (
+    RTCPeerConnection,
+    RTCConfiguration,
+    RTCIceServer,
+    RTCSessionDescription,
+    MediaStreamTrack
+)
 from aiortc.contrib.media import MediaBlackhole
 
 from parcnet import PARCnet
 
+# Constantes
 SR = 44100
 LOSS_THRESHOLD = 0.10  # 10%
 
+# Configura FastAPI y CORS
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -24,6 +33,7 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
+# Carga configuración de PARCnet
 with open("config/config.yaml") as f:
     cfg = yaml.safe_load(f)
 
@@ -40,34 +50,35 @@ parcnet = PARCnet(
     lite=cfg["neural_net"]["lite"],
 )
 
-ice_servers = [{"urls": "stun:stun.l.google.com:19302"}]
-pc = RTCPeerConnection({"iceServers": ice_servers})
-
-pending_ice = []
-
-@pc.on("icecandidate")
-def on_icecandidate(event):
-    if event.candidate:
-        pending_ice.append(event.candidate)
+# Define ICE servers (STUN + TURN público de prueba)
+ice_servers = [
+    RTCIceServer(urls="stun:stun.l.google.com:19302"),
+    RTCIceServer(
+        urls="turn:numb.viagenie.ca:3478",
+        username="webrtc@live.com",
+        credential="muazkh"
+    )
+]
+rtc_config = RTCConfiguration(iceServers=ice_servers)
 
 @app.post("/offer")
 async def offer(request: Request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-    pc = RTCPeerConnection({"iceServers": ice_servers})
+    # 1. Crea PeerConnection con ICE
+    pc = RTCPeerConnection(rtc_config)
     dc = pc.createDataChannel("control")
     media_blackhole = MediaBlackhole()
 
+    # 2. Estadísticas de pérdida
     stats = {"packetsLost": 0, "packetsReceived": 0, "loss_rate": 0.0}
 
     async def stats_loop():
-        """Cada segundo consulta getStats() y actualiza stats['loss_rate']."""
         while True:
             report = await pc.getStats()
             for s in report.values():
                 if s.type == "inbound-rtp" and s.kind == "audio":
-                    # Actualiza recuentos
                     stats["packetsLost"] = s.packetsLost
                     stats["packetsReceived"] = s.packetsReceived
                     if stats["packetsReceived"] > 0:
@@ -76,6 +87,7 @@ async def offer(request: Request):
 
     asyncio.create_task(stats_loop())
 
+    # 3. Procesamiento de pista de audio
     @pc.on("track")
     async def on_track(track: MediaStreamTrack):
         if track.kind != "audio":
@@ -91,21 +103,26 @@ async def offer(request: Request):
                 except Exception:
                     break
 
+                # Normaliza y resamplea
                 pcm = frame.to_ndarray()[0].astype(np.float32) / 32768.0
                 if frame.sample_rate != SR:
                     pcm = librosa.resample(pcm, orig_sr=frame.sample_rate, target_sr=SR)
 
                 buffer.append(pcm)
+
+                # Aplica PARCnet si la pérdida supera el umbral
                 if stats["loss_rate"] > LOSS_THRESHOLD:
                     full_signal = np.concatenate(buffer)
                     trace = np.zeros(len(full_signal) // cfg["global"]["packet_dim"], dtype=int)
                     enhanced = parcnet(full_signal, trace)
                     window = enhanced[-len(pcm):]
-                    buffer = []  
+                    buffer = []
                     applied_parcnet = True
                 else:
                     window = pcm
                     applied_parcnet = False
+
+                # Detección de pitch
                 f0 = librosa.yin(
                     y=window,
                     fmin=librosa.note_to_hz("C2"),
@@ -122,11 +139,15 @@ async def offer(request: Request):
                 midi_corrected = int(np.round(midi)) + 12
                 note_name = librosa.midi_to_note(midi_corrected)
 
+                # Log en consola solo si pasó por PARCnet
                 if applied_parcnet:
-                    print(f"[LOSS_RATE: {stats['loss_rate']*100:.1f}%] "
-                          f"[PARCnet applied: True] "
-                          f"[Detected note: {note_name} @ {frequency:.1f} Hz]")
+                    print(
+                        f"[LOSS_RATE: {stats['loss_rate']*100:.1f}%] "
+                        f"[PARCnet applied: True] "
+                        f"[Detected note: {note_name} @ {frequency:.1f} Hz]"
+                    )
 
+                # Envía datos al cliente
                 dc.send(json.dumps({
                     "note": note_name,
                     "frequency": frequency,
@@ -137,20 +158,16 @@ async def offer(request: Request):
             track.stop()
             await media_blackhole.start()
 
+    # 4. Intercambio SDP y ICE
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    async def wait_ice():
-        # timeout si algo falla
-        for _ in range(50):
-            if pc.iceGatheringState == "complete":
-                return
-            await asyncio.sleep(0.1)
-    await wait_ice()
+    # Espera a que termine ICE gathering
+    while pc.iceGatheringState != "complete":
+        await asyncio.sleep(0.1)
 
     return JSONResponse({
         "sdp": pc.localDescription.sdp,
         "type": pc.localDescription.type
     })
-
