@@ -100,11 +100,11 @@ async def offer(request: Request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-    # 1) crea PeerConnection con ICE dinámico
+    # crea PeerConnection con config ICE
     pc = RTCPeerConnection(rtc_config)
     media_blackhole = MediaBlackhole()
 
-    # Logging ICE y conexión
+    # logging ICE y conexión
     @pc.on("iceconnectionstatechange")
     def on_ice_state():
         print("🔄 [SERVER] ICE state:", pc.iceConnectionState)
@@ -113,30 +113,36 @@ async def offer(request: Request):
     def on_conn_state():
         print("🛡️ [SERVER] Connection state:", pc.connectionState)
 
-    # 2) crea DataChannel y pon listeners
-    dc = pc.createDataChannel("control")
+    # prepárate para capturar el DataChannel que crea el cliente
+    dc = None
 
-    @dc.on("open")
-    def on_dc_open():
-        print("🟢 [SERVER] DataChannel abierto")
-        # heartbeat para mantener SCTP
-        async def heartbeat():
-            while dc.readyState == "open":
-                dc.send("ping")
-                await asyncio.sleep(1.0)
-        asyncio.create_task(heartbeat())
+    @pc.on("datachannel")
+    def on_datachannel(channel):
+        nonlocal dc
+        dc = channel
+        print("🟢 [SERVER] DataChannel abierto por el cliente")
 
-    @dc.on("message")
-    def on_dc_message(msg):
-        # opcional: ver si llega el ping
-        print("📨 [SERVER] mensaje recibido en DC:", msg)
+        @dc.on("open")
+        def on_dc_open():
+            print("🟢 [SERVER] DataChannel READY")
+            # heartbeat para mantener SCTP vivo
+            async def heartbeat():
+                while dc.readyState == "open":
+                    dc.send("ping")
+                    await asyncio.sleep(1.0)
+            asyncio.create_task(heartbeat())
 
-    @dc.on("close")
-    def on_dc_close():
-        print("⚠️ [SERVER] DataChannel cerrado")
+        @dc.on("message")
+        def on_dc_message(msg):
+            print("📨 [SERVER] mensaje recibido en DC:", msg)
 
-    # 3) stats loop
+        @dc.on("close")
+        def on_dc_close():
+            print("⚠️ [SERVER] DataChannel cerrado por el cliente")
+
+    # estadísticas de pérdida
     stats = {"packetsLost": 0, "packetsReceived": 0, "loss_rate": 0.0}
+
     async def stats_loop():
         while True:
             report = await pc.getStats()
@@ -147,9 +153,10 @@ async def offer(request: Request):
                     if stats["packetsReceived"] > 0:
                         stats["loss_rate"] = stats["packetsLost"] / stats["packetsReceived"]
             await asyncio.sleep(1.0)
+
     asyncio.create_task(stats_loop())
 
-    # 4) track handler
+    # procesamiento de la pista de audio
     @pc.on("track")
     async def on_track(track: MediaStreamTrack):
         if track.kind != "audio":
@@ -204,22 +211,25 @@ async def offer(request: Request):
                         f"[PARCnet applied: True] "
                         f"[Detected note: {note_name} @ {frequency:.1f} Hz]"
                     )
-                dc.send(json.dumps({
-                    "note": note_name,
-                    "frequency": frequency,
-                    "loss_rate": stats["loss_rate"]
-                }))
+
+                # envía por el canal recibido
+                if dc and dc.readyState == "open":
+                    dc.send(json.dumps({
+                        "note": note_name,
+                        "frequency": frequency,
+                        "loss_rate": stats["loss_rate"]
+                    }))
 
         finally:
             track.stop()
             await media_blackhole.start()
 
-    # 5) intercambio SDP
+    # intercambio SDP
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    # espera ICE gathering
+    # espera a que termine ICE gathering
     while pc.iceGatheringState != "complete":
         await asyncio.sleep(0.1)
 
