@@ -51,26 +51,37 @@ parcnet = PARCnet(
 )
 
 def fetch_xirsys_ice():
-    url = "https://global.xirsys.net/_turn/musicnet-demo"
-    payload = {
-        "ident": "ValeLopezCubillos",
-        "secret": "08b07ede-306d-11f0-83bd-0242ac150002",
-        "channel": "musicnet-demo"
-    }
-    res = requests.put(url, json=payload, timeout=5)
+    ident  = "ValeLopezCubillos"
+    secret = "08b07ede-306d-11f0-83bd-0242ac150002"
+    url    = f"https://ValeLopezCubillos:08b07ede-306d-11f0-83bd-0242ac150002@global.xirsys.net/_turn/musicnet-demo"
+
+    res = requests.put(
+        url,
+        headers={"Content-Type": "application/json"},
+        json={"format": "urls"},
+        timeout=5
+    )
     res.raise_for_status()
-    servers = res.json()["v"]["iceServers"]
-    # Convierte a RTCIceServer
+    resp = res.json()
+    print("📝 Xirsys response:", resp)
+
+    container = resp.get("v") or resp.get("d")
+    ice_data = container.get("iceServers")
+    
+    if isinstance(ice_data, dict):
+        ice_list = [ice_data]
+    else:
+        ice_list = ice_data  
+
     return [
         RTCIceServer(
             urls=entry["urls"],
             username=entry.get("username"),
             credential=entry.get("credential")
         )
-        for entry in servers
+        for entry in ice_list
     ]
 
-# 2) Antes de crear tu endpoint, obtén iceServers
 ice_servers = fetch_xirsys_ice()
 rtc_config  = RTCConfiguration(iceServers=ice_servers)
 
@@ -79,12 +90,10 @@ async def offer(request: Request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-    # 1. Crea PeerConnection con ICE
     pc = RTCPeerConnection(rtc_config)
     dc = pc.createDataChannel("control")
     media_blackhole = MediaBlackhole()
 
-    # 2. Estadísticas de pérdida
     stats = {"packetsLost": 0, "packetsReceived": 0, "loss_rate": 0.0}
 
     async def stats_loop():
@@ -100,7 +109,6 @@ async def offer(request: Request):
 
     asyncio.create_task(stats_loop())
 
-    # 3. Procesamiento de pista de audio
     @pc.on("track")
     async def on_track(track: MediaStreamTrack):
         if track.kind != "audio":
@@ -116,14 +124,12 @@ async def offer(request: Request):
                 except Exception:
                     break
 
-                # Normaliza y resamplea
                 pcm = frame.to_ndarray()[0].astype(np.float32) / 32768.0
                 if frame.sample_rate != SR:
                     pcm = librosa.resample(pcm, orig_sr=frame.sample_rate, target_sr=SR)
 
                 buffer.append(pcm)
 
-                # Aplica PARCnet si la pérdida supera el umbral
                 if stats["loss_rate"] > LOSS_THRESHOLD:
                     full_signal = np.concatenate(buffer)
                     trace = np.zeros(len(full_signal) // cfg["global"]["packet_dim"], dtype=int)
@@ -135,7 +141,6 @@ async def offer(request: Request):
                     window = pcm
                     applied_parcnet = False
 
-                # Detección de pitch
                 f0 = librosa.yin(
                     y=window,
                     fmin=librosa.note_to_hz("C2"),
@@ -152,15 +157,12 @@ async def offer(request: Request):
                 midi_corrected = int(np.round(midi)) + 12
                 note_name = librosa.midi_to_note(midi_corrected)
 
-                # Log en consola solo si pasó por PARCnet
                 if applied_parcnet:
                     print(
                         f"[LOSS_RATE: {stats['loss_rate']*100:.1f}%] "
                         f"[PARCnet applied: True] "
                         f"[Detected note: {note_name} @ {frequency:.1f} Hz]"
                     )
-
-                # Envía datos al cliente
                 dc.send(json.dumps({
                     "note": note_name,
                     "frequency": frequency,
@@ -171,12 +173,10 @@ async def offer(request: Request):
             track.stop()
             await media_blackhole.start()
 
-    # 4. Intercambio SDP y ICE
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    # Espera a que termine ICE gathering
     while pc.iceGatheringState != "complete":
         await asyncio.sleep(0.1)
 
