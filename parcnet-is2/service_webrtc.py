@@ -1,5 +1,4 @@
 # service_webrtc.py
-
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,7 +8,8 @@ import librosa
 import yaml
 import asyncio
 import torch
-
+import os
+import requests
 from aiortc import (
     RTCPeerConnection,
     RTCConfiguration,
@@ -50,16 +50,29 @@ parcnet = PARCnet(
     lite=cfg["neural_net"]["lite"],
 )
 
-# Define ICE servers (STUN + TURN público de prueba)
-ice_servers = [
-    RTCIceServer(urls="stun:stun.l.google.com:19302"),
-    RTCIceServer(
-        urls="turn:numb.viagenie.ca:3478",
-        username="webrtc@live.com",
-        credential="muazkh"
-    )
-]
-rtc_config = RTCConfiguration(iceServers=ice_servers)
+def fetch_xirsys_ice():
+    url = "https://global.xirsys.net/_turn/musicnet-demo"
+    payload = {
+        "ident": "ValeLopezCubillos",
+        "secret": "08b07ede-306d-11f0-83bd-0242ac150002",
+        "channel": "musicnet-demo"
+    }
+    res = requests.put(url, json=payload, timeout=5)
+    res.raise_for_status()
+    servers = res.json()["v"]["iceServers"]
+    # Convierte a RTCIceServer
+    return [
+        RTCIceServer(
+            urls=entry["urls"],
+            username=entry.get("username"),
+            credential=entry.get("credential")
+        )
+        for entry in servers
+    ]
+
+# 2) Antes de crear tu endpoint, obtén iceServers
+ice_servers = fetch_xirsys_ice()
+rtc_config  = RTCConfiguration(iceServers=ice_servers)
 
 @app.post("/offer")
 async def offer(request: Request):
