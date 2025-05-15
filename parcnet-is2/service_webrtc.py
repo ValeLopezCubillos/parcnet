@@ -80,13 +80,12 @@ rtc_config  = RTCConfiguration(iceServers=ice_servers)
 
 @app.get("/ice")
 def get_ice():
-    return {"iceServers": [
-        {
-            "urls": s.urls,
-            "username": s.username,
-            "credential": s.credential
-        } for s in fetch_xirsys_ice()
-    ]}
+    ice = [
+      {"urls": s.urls, "username": s.username, "credential": s.credential}
+      for s in fetch_xirsys_ice()
+    ]
+    print("🔔 GET /ice responde:", ice)
+    return {"iceServers": ice}
 
 @app.post("/offer")
 async def offer(request: Request):
