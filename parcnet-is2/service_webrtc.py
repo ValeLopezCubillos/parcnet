@@ -22,11 +22,9 @@ from aiortc.contrib.media import MediaBlackhole
 
 from parcnet import PARCnet
 
-# Constantes
 SR = 44100
 LOSS_THRESHOLD = 0.10  # 10%
 
-# FastAPI + CORS
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
@@ -34,7 +32,6 @@ app.add_middleware(
     allow_methods=["*"], allow_headers=["*"],
 )
 
-# Carga modelo PARCnet
 with open("config/config.yaml") as f:
     cfg = yaml.safe_load(f)
 
@@ -67,10 +64,8 @@ def fetch_xirsys_ice():
     container = resp.get("v") or resp.get("d")
     ice_data = container["iceServers"]
 
-    # Asegura lista
     ice_entries = [ice_data] if isinstance(ice_data, dict) else ice_data
 
-    # Devuelve instancias RTCIceServer
     return [
         RTCIceServer(
             urls=entry["urls"],
@@ -80,13 +75,11 @@ def fetch_xirsys_ice():
         for entry in ice_entries
     ]
 
-# Construye configuración ICE
 ice_servers = fetch_xirsys_ice()
 rtc_config  = RTCConfiguration(iceServers=ice_servers)
 
 @app.get("/ice")
 def get_ice():
-    # para debugging o cliente que pida ICE
     return {"iceServers": [
         {
             "urls": s.urls,
@@ -100,41 +93,12 @@ async def offer(request: Request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-    # 1) crea PeerConnection con ICE dinámico
     pc = RTCPeerConnection(rtc_config)
     media_blackhole = MediaBlackhole()
 
-    # 1.a) variable para triggers desde el cliente
     pending_trigger = False
+    dc = None
 
-    # 1.b) crea proactivamente un DataChannel en el servidor
-    dc = pc.createDataChannel("control")
-    print("📡 [SERVER] DataChannel creado proactivamente")
-
-    @dc.on("open")
-    def _():
-        print("🟢 [SERVER] DataChannel READY")
-
-    @dc.on("message")
-    def _on_message(msg):
-        print("📨 [SERVER] Mensaje recibido por DataChannel:", msg)
-        # quizá el cliente envíe comandos también por aquí
-        # pending_trigger = True  # si quisieras usarlo
-
-    @dc.on("close")
-    def _():
-        print("⚠️ [SERVER] DataChannel cerrado por el cliente")
-
-    # 2) logging ICE y conexión
-    @pc.on("iceconnectionstatechange")
-    def on_ice_state():
-        print("🔄 [SERVER] ICE state:", pc.iceConnectionState)
-
-    @pc.on("connectionstatechange")
-    def on_conn_state():
-        print("🛡️ [SERVER] Connection state:", pc.connectionState)
-
-    # 3) captura el DataChannel que abre el cliente (por si importan los labels del cliente)
     @pc.on("datachannel")
     def on_datachannel(channel):
         nonlocal dc, pending_trigger
@@ -154,7 +118,6 @@ async def offer(request: Request):
         def _():
             print("⚠️ [SERVER] DataChannel cerrado por el cliente")
 
-    # 4) estadísticas de pérdida (igual que antes)…
     stats = {"packetsLost": 0, "packetsReceived": 0, "loss_rate": 0.0}
     async def stats_loop():
         while True:
@@ -168,7 +131,6 @@ async def offer(request: Request):
             await asyncio.sleep(1.0)
     asyncio.create_task(stats_loop())
 
-    # 5) procesamiento de audio y detección de nota
     @pc.on("track")
     async def on_track(track: MediaStreamTrack):
         if track.kind != "audio":
@@ -236,12 +198,10 @@ async def offer(request: Request):
             track.stop()
             await media_blackhole.start()
 
-    # 6) intercambio SDP
     await pc.setRemoteDescription(offer)
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    # 7) espera a que ICE termine de gather
     while pc.iceGatheringState != "complete":
         await asyncio.sleep(0.1)
 
