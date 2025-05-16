@@ -1,4 +1,3 @@
-# service_webrtc.py
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,16 +7,8 @@ import librosa
 import yaml
 import asyncio
 import torch
-import os
-import requests
 
-from aiortc import (
-    RTCPeerConnection,
-    RTCConfiguration,
-    RTCIceServer,
-    RTCSessionDescription,
-    MediaStreamTrack
-)
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaStreamTrack
 from aiortc.contrib.media import MediaBlackhole
 
 from parcnet import PARCnet
@@ -48,86 +39,30 @@ parcnet = PARCnet(
     lite=cfg["neural_net"]["lite"],
 )
 
-def fetch_xirsys_ice():
-    ident  = "ValeLopezCubillos"
-    secret = "08b07ede-306d-11f0-83bd-0242ac150002"
-    url    = f"https://ValeLopezCubillos:08b07ede-306d-11f0-83bd-0242ac150002@global.xirsys.net/_turn/musicnet-demo"
-
-    res = requests.put(
-        url,
-        headers={"Content-Type": "application/json"},
-        json={"format": "urls"},
-        timeout=5
-    )
-    res.raise_for_status()
-    resp = res.json()
-    container = resp.get("v") or resp.get("d")
-    ice_data = container["iceServers"]
-
-    ice_entries = [ice_data] if isinstance(ice_data, dict) else ice_data
-
-    return [
-        RTCIceServer(
-            urls=entry["urls"],
-            username=entry.get("username"),
-            credential=entry.get("credential")
-        )
-        for entry in ice_entries
-    ]
-
-ice_servers = fetch_xirsys_ice()
-rtc_config  = RTCConfiguration(iceServers=ice_servers)
-
-@app.get("/ice")
-def get_ice():
-    ice = [
-      {"urls": s.urls, "username": s.username, "credential": s.credential}
-      for s in fetch_xirsys_ice()
-    ]
-    print("🔔 GET /ice responde:", ice)
-    return {"iceServers": ice}
-
 @app.post("/offer")
 async def offer(request: Request):
     params = await request.json()
     offer = RTCSessionDescription(sdp=params["sdp"], type=params["type"])
 
-    pc = RTCPeerConnection(rtc_config)
+    pc = RTCPeerConnection()
+    dc = pc.createDataChannel("control")
     media_blackhole = MediaBlackhole()
 
-    pending_trigger = False
-    dc = None
-
-    @pc.on("datachannel")
-    def on_datachannel(channel):
-        nonlocal dc, pending_trigger
-        dc = channel
-        print("🟢 [SERVER] DataChannel abierto por el cliente")
-
-        @dc.on("open")
-        def _():
-            print("🟢 [SERVER] DataChannel READY")
-
-        @dc.on("message")
-        def _on_trigger(msg):
-            print("📨 [SERVER] Trigger recibido:", msg)
-            pending_trigger = True
-
-        @dc.on("close")
-        def _():
-            print("⚠️ [SERVER] DataChannel cerrado por el cliente")
-
     stats = {"packetsLost": 0, "packetsReceived": 0, "loss_rate": 0.0}
+
     async def stats_loop():
+        """Cada segundo consulta getStats() y actualiza stats['loss_rate']."""
         while True:
             report = await pc.getStats()
             for s in report.values():
                 if s.type == "inbound-rtp" and s.kind == "audio":
+                    # Actualiza recuentos
                     stats["packetsLost"] = s.packetsLost
                     stats["packetsReceived"] = s.packetsReceived
                     if stats["packetsReceived"] > 0:
                         stats["loss_rate"] = stats["packetsLost"] / stats["packetsReceived"]
             await asyncio.sleep(1.0)
+
     asyncio.create_task(stats_loop())
 
     @pc.on("track")
@@ -140,58 +75,52 @@ async def offer(request: Request):
 
         try:
             while True:
-                frame = await track.recv()
+                try:
+                    frame = await track.recv()
+                except Exception:
+                    break
+
                 pcm = frame.to_ndarray()[0].astype(np.float32) / 32768.0
                 if frame.sample_rate != SR:
                     pcm = librosa.resample(pcm, orig_sr=frame.sample_rate, target_sr=SR)
 
                 buffer.append(pcm)
-
-                if pending_trigger:
-                    pending_trigger = False
+                if stats["loss_rate"] > LOSS_THRESHOLD:
                     full_signal = np.concatenate(buffer)
                     trace = np.zeros(len(full_signal) // cfg["global"]["packet_dim"], dtype=int)
-                    if stats["loss_rate"] > LOSS_THRESHOLD:
-                        enhanced = parcnet(full_signal, trace)
-                        window = enhanced[-len(pcm):]
-                        applied_parcnet = True
-                    else:
-                        window = pcm
-                        applied_parcnet = False
+                    enhanced = parcnet(full_signal, trace)
+                    window = enhanced[-len(pcm):]
+                    buffer = []  
+                    applied_parcnet = True
+                else:
+                    window = pcm
+                    applied_parcnet = False
+                f0 = librosa.yin(
+                    y=window,
+                    fmin=librosa.note_to_hz("C2"),
+                    fmax=librosa.note_to_hz("C7"),
+                    sr=SR,
+                    frame_length=2048,
+                    hop_length=512,
+                )
+                f0_clean = f0[~np.isnan(f0)]
+                if len(f0_clean) == 0:
+                    continue
+                frequency = float(np.median(f0_clean))
+                midi = librosa.hz_to_midi(frequency)
+                midi_corrected = int(np.round(midi)) + 12
+                note_name = librosa.midi_to_note(midi_corrected)
 
-                    f0 = librosa.yin(
-                        y=window,
-                        fmin=librosa.note_to_hz("C2"),
-                        fmax=librosa.note_to_hz("C7"),
-                        sr=SR,
-                        frame_length=2048,
-                        hop_length=512,
-                    )
-                    f0_clean = f0[~np.isnan(f0)]
-                    if len(f0_clean) == 0:
-                        buffer.clear()
-                        continue
+                if applied_parcnet:
+                    print(f"[LOSS_RATE: {stats['loss_rate']*100:.1f}%] "
+                          f"[PARCnet applied: True] "
+                          f"[Detected note: {note_name} @ {frequency:.1f} Hz]")
 
-                    frequency = float(np.median(f0_clean))
-                    midi = librosa.hz_to_midi(frequency)
-                    midi_corrected = int(np.round(midi)) + 12
-                    note_name = librosa.midi_to_note(midi_corrected)
-
-                    if applied_parcnet:
-                        print(
-                            f"[LOSS_RATE: {stats['loss_rate']*100:.1f}%] "
-                            f"[PARCnet applied: True] "
-                            f"[Detected note: {note_name} @ {frequency:.1f} Hz]"
-                        )
-
-                    if dc and dc.readyState == "open":
-                        dc.send(json.dumps({
-                            "note": note_name,
-                            "frequency": frequency,
-                            "loss_rate": stats["loss_rate"]
-                        }))
-
-                    buffer.clear()
+                dc.send(json.dumps({
+                    "note": note_name,
+                    "frequency": frequency,
+                    "loss_rate": stats["loss_rate"]
+                }))
 
         finally:
             track.stop()
@@ -201,11 +130,9 @@ async def offer(request: Request):
     answer = await pc.createAnswer()
     await pc.setLocalDescription(answer)
 
-    while pc.iceGatheringState != "complete":
-        await asyncio.sleep(0.1)
-
     return JSONResponse({
         "sdp": pc.localDescription.sdp,
         "type": pc.localDescription.type
     })
+
 
